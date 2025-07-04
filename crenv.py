@@ -26,4 +26,10 @@ try:
     subprocess.run(virtualenv_command, check=True)
 except subprocess.CalledProcessError as e:
     print(f"virtualenv 命令执行失败: {e}")
-    sys.exit(1)
+    try:
+        virtualenv_command = f"b:/py{ver}/python.exe -m  virtualenv --always-copy {env_name}".split()
+        subprocess.run(virtualenv_command, check=True)
+    except subprocess.CalledProcessError as e:
+        print(f"第二次尝试 virtualenv 命令执行失败: {e}")
+        sys.exit(2)
+        
