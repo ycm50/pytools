@@ -18,7 +18,7 @@
 
 - **pip.exe**  
   用法：`pip py版本号 pip命令`  
-  说明：用对应 Python 版本执行 pip 命令。例如：`pip 312 install numpy`
+  说明：用对应 Python 版本执行 pip 命令。例如：`pip 3.11.2 install numpy`
 
 - **py.exe**  
   用法：`py py版本号 命令`  
@@ -45,7 +45,7 @@
 
 ## 其他
 
-- 子目录为不同环境补充内容，普通用户无需关注。
+- 子目录为py编译环境补充内容，普通用户无需关注。
 - 如需查看更多文件，请前往 [GitHub 主目录](https://github.com/ycm50/pytools/tree/master)。
 
 ---
