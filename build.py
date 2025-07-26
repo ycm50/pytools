@@ -25,8 +25,8 @@ def replace_in_file(file_path, disk_name, download_folder):
                 content=""
             else:
                 content = f.read()
-                content = re.sub(r'b:\\', rf'{disk_name}:/', content)
-                content = re.sub(r'b:/', rf'{disk_name}:/', content)
+                content = re.sub(r'a:\\', rf'{disk_name}:/', content)
+                content = re.sub(r'a:/', rf'{disk_name}:/', content)
                 with open(file_path, 'w', encoding='utf-8') as f:
                     f.write(content)
     except Exception as e:

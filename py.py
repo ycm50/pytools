@@ -10,7 +10,7 @@ def main():
         sys.exit(1)
 
     version = sys.argv[1]
-    python_path = f"b:/py{version}/python.exe"
+    python_path = f"a:/py{version}/python.exe"
 
     if not os.path.exists(python_path):
         print(f"Error: Python {version} interpreter not found at {python_path}")

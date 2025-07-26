@@ -1,7 +1,7 @@
+from nt import system
 import os
 import sys
 import zipfile
-import urllib.request
 import subprocess
 import glob
 import ctypes
@@ -54,24 +54,19 @@ url = f'https://www.python.org/ftp/python/{ver}/python-{ver}-embed-amd64.zip'
 
 downloads_path = get_downloads_directory()
 print(downloads_path)
-target_dir = f'b:\\py{ver}'
+target_dir = f'a:\\py{ver}'
 
 os.chdir(downloads_path)
 filename = f'py{ver}.zip'
 
 print(f'正在下载 Python {ver} 压缩包...')
-urllib.request.urlretrieve(url, filename)
+subprocess.run(['curl.exe', '-L', url, '-o', filename], check=True)
 
 print(f'正在解压到 {target_dir}...')
 os.makedirs(target_dir, exist_ok=True)
 with zipfile.ZipFile(filename, 'r') as zip_ref:
     zip_ref.extractall(target_dir)
 os.remove(filename)
-
-# 下载 get-pip.py
-pip_url = 'https://bootstrap.pypa.io/get-pip.py'
-pip_file = os.path.join(target_dir, 'get-pip.py')
-urllib.request.urlretrieve(pip_url, pip_file)
 
 # 修改 ._pth 文件
 pth_files = glob.glob(os.path.join(target_dir, 'python*._pth'))
@@ -81,6 +76,14 @@ if pth_files:
     with open(pth_file, 'a') as f:
         f.write('\nimport site')
 
+# 下载 get-pip.py
+ver2 = ver.split('.')
+ver3=ver2[0]+'.'+ver2[1]
+pip_url = 'https://bootstrap.pypa.io/get-pip.py'if int(ver2[1]) >= 9 else f'https://bootstrap.pypa.io/pip/{ver3}/get-pip.py'
+pip_file = os.path.join(target_dir, 'get-pip.py')
+subprocess.run(['curl.exe', '-L', pip_url, '-o', pip_file], check=True)
+
+
 # 安装 pip
 python_exe = os.path.join(target_dir, 'python.exe')
 try:
@@ -88,5 +91,5 @@ try:
     print('pip 安装完成')
 except Exception as e:
     print(f'安装 pip 失败: {e}')
-
+os.remove(pip_file)
 print('Python 压缩版安装完成（便携版）')
