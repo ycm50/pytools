@@ -12,11 +12,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    std::string ver, env_name;
-    if (argc >= 3) {
-        ver = argv[1];
-        env_name = argv[2];
-    }
+    std::string ver = argv[1];
+    std::string env_name = argv[2];
 
     bool has_dot = (ver.find('.') != std::string::npos);
     if (!has_dot) {
@@ -28,19 +25,23 @@ int main(int argc, char* argv[]) {
 
     std::wstring python_path = get_python_path(utf8_to_utf16(ver));
     if (!file_exists(python_path))
-        die("错误: Python " + ver + " 未安装于 " + utf16_to_utf8(python_path));
+        die("错误: Python " + ver + " 未安装于 " + utf16_to_utf8(python_path) +
+            "（可在目标盘执行 pyins " + ver + " 安装）");
 
     // 步骤 1: 安装 virtualenv
     println("正在安装 virtualenv...");
     int ret = run_process(python_path, { L"-m", L"pip", L"install", L"virtualenv" });
 
     if (ret != 0) {
-        // 回退：通过 pip 工具
+        // 回退：通过同目录的 pip 工具
         println("python -m pip 方式失败，尝试 pip 工具...");
+        std::wstring pip_tool = get_executable_dir() + L"\\pip.exe";
+        if (!file_exists(pip_tool))
+            pip_tool = L"pip";
         std::vector<std::wstring> pip_args = {
             utf8_to_utf16(ver), L"install", L"virtualenv"
         };
-        ret = run_process(L"pip", pip_args);
+        ret = run_process(pip_tool, pip_args);
         if (ret != 0)
             die("virtualenv 安装失败");
     }
@@ -48,8 +49,7 @@ int main(int argc, char* argv[]) {
 
     // 步骤 2: 创建虚拟环境
     std::wstring env_path = utf8_to_utf16(env_name);
-    std::wstring virtualenv_path = get_drive_letter() + L"/py"
-        + utf8_to_utf16(ver) + L"/Scripts/virtualenv.exe";
+    std::wstring virtualenv_path = get_python_scripts_dir(utf8_to_utf16(ver)) + L"\\virtualenv.exe";
 
     if (file_exists(virtualenv_path)) {
         println("正在通过 virtualenv.exe 创建虚拟环境...");

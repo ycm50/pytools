@@ -16,6 +16,12 @@ static std::string to_lower(const std::string& s) {
     return result;
 }
 
+// 同目录的 pip 工具，找不到时退回 PATH 中的 pip
+static std::wstring pip_tool_path() {
+    std::wstring tool = get_executable_dir() + L"\\pip.exe";
+    return file_exists(tool) ? tool : std::wstring(L"pip");
+}
+
 static bool should_keep(const std::string& pkg_name) {
     std::string lower = to_lower(pkg_name);
     for (const auto& keep : KEEP_PACKAGES) {
@@ -42,7 +48,7 @@ int main(int argc, char* argv[]) {
     if (!ver.empty()) pip_args.push_back(utf8_to_utf16(ver));
     pip_args.push_back(L"freeze");
 
-    int ret = run_process_with_output(L"pip", pip_args,
+    int ret = run_process_with_output(pip_tool_path(), pip_args,
         [&](const std::string& line) {
             size_t eq_pos = line.find("==");
             if (eq_pos != std::string::npos)
@@ -80,7 +86,7 @@ int main(int argc, char* argv[]) {
     uninstall_args.push_back(L"--no-input");
 
     println("正在卸载...");
-    int unret = run_process(L"pip", uninstall_args);
+    int unret = run_process(pip_tool_path(), uninstall_args);
     if (unret == 0)
         println("清理完成");
     else

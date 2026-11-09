@@ -1,0 +1,156 @@
+name: Release
+
+# 手动触发；tag 号作为输入参数。
+# 只有全部构建成功后才创建 tag 并发布 Release，构建失败不会留下 tag。
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '发布 tag 号（例如 v1.0.0）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  BUILD_DIR: build
+
+jobs:
+  build:
+    name: Build MinGW x64
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - msystem: UCRT64
+            prefix: mingw-w64-ucrt-x86_64
+          - msystem: MINGW64
+            prefix: mingw-w64-x86_64
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: true
+          install: >-
+            ${{ matrix.prefix }}-gcc
+            ${{ matrix.prefix }}-cmake
+            ${{ matrix.prefix }}-ninja
+
+      - name: Configure
+        run: cmake -S . -B ${BUILD_DIR} -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build ${BUILD_DIR}
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "dist/pytools-${{ matrix.msystem }}"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+          Copy-Item "${env:BUILD_DIR}/bin/*.exe" -Destination $out -Force
+          Copy-Item "${env:BUILD_DIR}/bin/uninstall.bat" -Destination $out -Force
+          Copy-Item "${env:BUILD_DIR}/bin/README.md" -Destination $out -Force
+          Compress-Archive -Path "$out/*" -DestinationPath "dist/pytools-${{ matrix.msystem }}.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytools-${{ matrix.msystem }}
+          path: dist/pytools-${{ matrix.msystem }}.zip
+          if-no-files-found: error
+
+  release:
+    name: Tag and Release
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Repackage
+        shell: pwsh
+        run: |
+          $stage = "release/pytools"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $tmp = "release/tmp"
+          New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+          foreach ($zip in Get-ChildItem dist -Filter *.zip -File) {
+            $sub = Join-Path $tmp $zip.BaseName
+            Expand-Archive -LiteralPath $zip.FullName -DestinationPath $sub -Force
+            Copy-Item "$sub/*" -Destination $stage -Force
+          }
+          Copy-Item "README.md" -Destination $stage -Force
+          Copy-Item "uninstall.bat" -Destination $stage -Force
+          $name = "pytools-${{ inputs.tag }}-windows-x64.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath "release/$name" -Force
+
+      - name: Create tag
+        shell: pwsh
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ inputs.tag }}" -m "pytools ${{ inputs.tag }}"
+          git push origin "${{ inputs.tag }}"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "${{ inputs.tag }}"
+          name: "pytools ${{ inputs.tag }}"
+          body: |
+            ## pytools ${{ inputs.tag }}
+
+            ### 安装
+
+            安装脚本不随发布包分发，先从仓库下载：
+
+            ```powershell
+            iwr https://raw.githubusercontent.com/ycm50/pytools/master/install.ps1 -OutFile install.ps1
+            ```
+
+            方式一（推荐，脚本自动下载本页最新发布包）：
+
+            ```powershell
+            powershell -ExecutionPolicy Bypass -File .\install.ps1
+            ```
+
+            方式二（解压本页的 zip 后离线安装）：
+
+            ```powershell
+            powershell -ExecutionPolicy Bypass -File .\install.ps1 -ZipPath .\pytools-${{ inputs.tag }}-windows-x64.zip
+            ```
+
+            安装脚本会把全部二进制装到当前盘根目录下的 `pytools` 目录，并写入用户 PATH。
+
+            ### 安装 Python
+
+            ```powershell
+            pyins 3.12.1
+            py 3.12.1
+            ```
+
+            ### 发布包内容
+
+            `pytools-${{ inputs.tag }}-windows-x64.zip` 内含 8 个二进制与 `README.md`（使用说明）。
+            安装脚本请从 https://raw.githubusercontent.com/ycm50/pytools/master/install.ps1 获取。
+          files: |
+            release/pytools-${{ inputs.tag }}-windows-x64.zip
+          draft: false
+          prerelease: false

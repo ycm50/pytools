@@ -19,6 +19,15 @@ int main(int argc, char* argv[]) {
         println("示例: py 3.11.2             启动 REPL");
         println("示例: py 3.11.2 script.py   运行脚本");
         println("示例: py 3.11.2 -c \"...\"    运行内联代码");
+        println("");
+        ConfigData cfg;
+        if (load_config(cfg) && !cfg.pythons.empty()) {
+            println("配置文件中已安装的 Python:");
+            for (const auto& kv : cfg.pythons)
+                println("  " + utf16_to_utf8(kv.first) + "  ->  " + utf16_to_utf8(kv.second));
+        } else {
+            println("尚未安装任何 Python，请先执行: pyins <version>");
+        }
         return 1;
     }
 
@@ -27,8 +36,18 @@ int main(int argc, char* argv[]) {
         die("错误: 无效的版本号 \"" + version + "\"，应为 x.y[.z] 格式");
 
     std::wstring python_path = get_python_path(utf8_to_utf16(version));
-    if (!file_exists(python_path))
-        die("错误: Python " + version + " 未安装于 " + utf16_to_utf8(python_path));
+    if (!file_exists(python_path)) {
+        print_error("Python " + version + " 未安装于 " + utf16_to_utf8(python_path));
+        std::wstring error;
+        std::wstring drive = resolve_drive_letter(&error);
+        if (drive.empty())
+            print_error("盘符识别失败: " + utf16_to_utf8(error));
+        else
+            println("当前识别到的盘符: " + utf16_to_utf8(drive) +
+                    "（可在当前目录执行 pyins " + version + " 安装）");
+        println("配置文件: " + utf16_to_utf8(get_config_path()));
+        return 1;
+    }
 
     if (argc == 2) {
         println("=== 启动 Python " + version + " REPL ===");

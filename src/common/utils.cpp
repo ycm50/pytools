@@ -1,4 +1,5 @@
 #include "common/utils.h"
+#include "common/json.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -14,32 +15,423 @@
 #include <system_error>
 #include <memory>
 #include <locale>
-#include <codecvt>
 #include <thread>
+#include <fstream>
 
 // ============================================================
 //  盘符
 // ============================================================
 
-std::wstring get_drive_letter() {
-    wchar_t env[4] = {0};
-    DWORD ret = GetEnvironmentVariableW(L"PYTOOLS_DRIVE", env, 4);
-    if (ret > 0 && ret <= 3) {
-        std::wstring d(env);
-        if (!d.empty() && (d.back() == L':' || d.back() == L'/'))
-            d.pop_back();
-        if (!d.empty())
-            return d + L":";
+std::wstring normalize_drive(const std::wstring& input) {
+    std::wstring d;
+    for (wchar_t c : input) {
+        if (c == L' ' || c == L'\t' || c == L'"' || c == L'\'')
+            continue;
+        d += c;
     }
-    return L"" PYTOOLS_DRIVE_LETTER L":";
+    if (d.empty())
+        return L"";
+
+    // 统一 "/" 为 "\"
+    for (wchar_t& c : d) {
+        if (c == L'/') c = L'\\';
+    }
+
+    // "A:" / "A:\" / "A:\xxx" -> "A:"
+    if (d.size() >= 2 && d[1] == L':') {
+        wchar_t letter = d[0];
+        if ((letter >= L'a' && letter <= L'z') || (letter >= L'A' && letter <= L'Z'))
+            return std::wstring(1, (wchar_t)towupper(letter)) + L":";
+        return L"";
+    }
+
+    // "A" -> "A:"
+    if (d.size() == 1) {
+        wchar_t letter = d[0];
+        if ((letter >= L'a' && letter <= L'z') || (letter >= L'A' && letter <= L'Z'))
+            return std::wstring(1, (wchar_t)towupper(letter)) + L":";
+        return L"";
+    }
+
+    return L"";
+}
+
+std::wstring current_working_drive() {
+    DWORD len = GetCurrentDirectoryW(0, nullptr);
+    if (len == 0)
+        return L"";
+    std::wstring buf(len, L'\0');
+    DWORD written = GetCurrentDirectoryW(len, &buf[0]);
+    if (written == 0 || written >= len)
+        return L"";
+    buf.resize(written);
+    return normalize_drive(buf);
+}
+
+std::wstring resolve_drive_letter(std::wstring* error) {
+    // 1. 环境变量 PYTOOLS_DRIVE 显式指定
+    wchar_t env[64] = {0};
+    DWORD ret = GetEnvironmentVariableW(L"PYTOOLS_DRIVE", env, 64);
+    if (ret > 0 && ret < 64) {
+        std::wstring d = normalize_drive(env);
+        if (!d.empty())
+            return d;
+    }
+
+    // 2. 自动识别：当前工作目录所在盘
+    std::wstring cwd_drive = current_working_drive();
+    if (!cwd_drive.empty() && directory_exists(drive_root(cwd_drive)))
+        return cwd_drive;
+
+    // 3. config.json 中记录的盘符（当前目录不是普通盘路径时兜底）
+    ConfigData cfg;
+    if (load_config(cfg)) {
+        std::wstring d = normalize_drive(cfg.drive);
+        if (!d.empty() && directory_exists(drive_root(d)))
+            return d;
+    }
+
+    // 4. 编译期默认盘符
+    std::wstring fallback = normalize_drive(L"" PYTOOLS_DRIVE_LETTER);
+    if (!fallback.empty() && directory_exists(drive_root(fallback)))
+        return fallback;
+
+    if (error) {
+        std::wstring msg = L"无法识别当前工作目录所在盘符";
+        if (!cwd_drive.empty())
+            msg += L"（" + cwd_drive + L" 盘不存在）";
+        *error = msg;
+    }
+    return L"";
+}
+
+std::wstring get_drive_letter() {
+    std::wstring drive = resolve_drive_letter();
+    if (!drive.empty())
+        return drive;
+    return normalize_drive(L"" PYTOOLS_DRIVE_LETTER);
+}
+
+std::wstring drive_root(const std::wstring& drive) {
+    std::wstring d = normalize_drive(drive);
+    if (d.empty())
+        return L"";
+    return d + L"\\";
+}
+
+// ============================================================
+//  配置文件（与二进制同目录的 config.json）
+// ============================================================
+
+std::wstring get_executable_path() {
+    std::vector<wchar_t> buf(MAX_PATH);
+    for (;;) {
+        DWORD n = GetModuleFileNameW(nullptr, buf.data(), (DWORD)buf.size());
+        if (n == 0)
+            return L"";
+        if (n < buf.size()) {
+            buf.resize(n);
+            return std::wstring(buf.begin(), buf.end());
+        }
+        buf.resize(buf.size() * 2);
+    }
+}
+
+std::wstring get_executable_dir() {
+    std::wstring exe = get_executable_path();
+    size_t pos = exe.find_last_of(L"/\\");
+    if (pos == std::wstring::npos)
+        return L".";
+    return exe.substr(0, pos);
+}
+
+std::wstring get_config_path() {
+    return get_executable_dir() + L"\\config.json";
+}
+
+bool load_config(ConfigData& cfg) {
+    std::ifstream in(get_config_path().c_str(), std::ios::binary);
+    if (!in)
+        return false;
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    if (text.empty())
+        return false;
+
+    jsonx::Value root;
+    if (!jsonx::parse(text, root) || !root.is_object())
+        return false;
+
+    cfg = ConfigData{};
+    if (const jsonx::Value* v = root.find("drive"))
+        cfg.drive = normalize_drive(utf8_to_utf16(v->as_string()));
+    if (const jsonx::Value* v = root.find("install_root"))
+        cfg.install_root = utf8_to_utf16(v->as_string());
+
+    if (const jsonx::Value* v = root.find("pythons")) {
+        if (v->type == jsonx::Value::Object) {
+            for (const auto& kv : v->object) {
+                if (!kv.second.is_string())
+                    continue;
+                cfg.pythons.emplace_back(utf8_to_utf16(kv.first),
+                                         utf8_to_utf16(kv.second.as_string()));
+            }
+        }
+    }
+    return true;
+}
+
+bool save_config(const ConfigData& cfg) {
+    std::wstring path = get_config_path();
+    std::wstring dir = get_executable_dir();
+    if (!directory_exists(dir))
+        create_directories(dir);
+
+    std::string out;
+    out += "{\n";
+    out += "  \"drive\": " + jsonx::quote(utf16_to_utf8(cfg.drive)) + ",\n";
+    out += "  \"install_root\": " + jsonx::quote(utf16_to_utf8(cfg.install_root)) + ",\n";
+    out += "  \"pythons\": {";
+
+    std::vector<std::pair<std::wstring, std::wstring>> entries = cfg.pythons;
+    std::sort(entries.begin(), entries.end(),
+              [](const std::pair<std::wstring, std::wstring>& a,
+                 const std::pair<std::wstring, std::wstring>& b) {
+                  return a.first < b.first;
+              });
+
+    if (!entries.empty()) {
+        out += "\n";
+        for (size_t i = 0; i < entries.size(); ++i) {
+            out += "    " + jsonx::quote(utf16_to_utf8(entries[i].first)) + ": "
+                 + jsonx::quote(utf16_to_utf8(entries[i].second));
+            if (i + 1 < entries.size()) out += ",";
+            out += "\n";
+        }
+        out += "  ";
+    }
+    out += "}\n";
+    out += "}\n";
+
+    std::ofstream f(path.c_str(), std::ios::binary | std::ios::trunc);
+    if (!f)
+        return false;
+    f.write(out.data(), (std::streamsize)out.size());
+    f.close();
+    return f ? true : (f.bad() ? false : true);
+}
+
+// 从 python.exe 的完整路径推导出它所在的盘符与安装根目录
+// 例如 "C:\py3.11.1\python.exe" -> drive="C:"、install_root="C:\"
+static bool drive_from_exe(const std::wstring& exe_path,
+                           std::wstring& drive, std::wstring& install_root) {
+    if (exe_path.size() < 2 || exe_path[1] != L':')
+        return false;
+    wchar_t letter = exe_path[0];
+    if (!((letter >= L'a' && letter <= L'z') || (letter >= L'A' && letter <= L'Z')))
+        return false;
+    drive = std::wstring(1, (wchar_t)towupper(letter)) + L":";
+    install_root = drive + L"\\";
+    return true;
+}
+
+bool record_python_install(const std::wstring& version, const std::wstring& python_exe) {
+    ConfigData cfg;
+    if (!load_config(cfg)) {
+        cfg = ConfigData{};
+    }
+
+    // 以实际安装路径为准，避免 -InstallDir 跨盘等情况下 drive/install_root 与实际不符
+    std::wstring exe_drive, exe_root;
+    if (drive_from_exe(python_exe, exe_drive, exe_root)) {
+        cfg.drive = exe_drive;
+        cfg.install_root = exe_root;
+    } else {
+        cfg.drive = get_drive_letter();
+        if (cfg.install_root.empty())
+            cfg.install_root = drive_root(cfg.drive);
+    }
+
+    bool replaced = false;
+    for (auto& kv : cfg.pythons) {
+        if (kv.first == version) {
+            kv.second = python_exe;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced)
+        cfg.pythons.emplace_back(version, python_exe);
+
+    return save_config(cfg);
+}
+
+bool unrecord_python_install(const std::wstring& version) {
+    ConfigData cfg;
+    if (!load_config(cfg))
+        return false;
+
+    bool removed = false;
+    for (auto it = cfg.pythons.begin(); it != cfg.pythons.end();) {
+        if (it->first == version) {
+            it = cfg.pythons.erase(it);
+            removed = true;
+        } else {
+            ++it;
+        }
+    }
+    if (!removed)
+        return false;
+    return save_config(cfg);
+}
+
+// ============================================================
+//  临时目录
+// ============================================================
+
+// 展开字符串中内嵌的 %VAR% 环境变量引用
+static std::wstring expand_env_vars(const std::wstring& input) {
+    if (input.find(L'%') == std::wstring::npos)
+        return input;
+
+    std::wstring out;
+    size_t i = 0;
+    while (i < input.size()) {
+        if (input[i] != L'%') {
+            out += input[i++];
+            continue;
+        }
+        size_t end = input.find(L'%', i + 1);
+        if (end == std::wstring::npos) {
+            out += input.substr(i);
+            break;
+        }
+        std::wstring name = input.substr(i + 1, end - i - 1);
+        if (name.empty()) {
+            out += L'%';
+            i = end + 1;
+            continue;
+        }
+        DWORD need = GetEnvironmentVariableW(name.c_str(), nullptr, 0);
+        if (need == 0) {
+            // 变量不存在，原样保留
+            out += input.substr(i, end - i + 1);
+        } else {
+            std::wstring value(need, L'\0');
+            DWORD written = GetEnvironmentVariableW(name.c_str(), &value[0], need);
+            if (written == 0 || written >= need)
+                out += input.substr(i, end - i + 1);
+            else {
+                value.resize(written);
+                out += value;
+            }
+        }
+        i = end + 1;
+    }
+    return out;
+}
+
+static std::wstring trim_trailing_separators(std::wstring path) {
+    while (!path.empty() && (path.back() == L'\\' || path.back() == L'/'))
+        path.pop_back();
+    // 保留根路径形式（"C:" 或 "\\server\share" 除外）
+    if (path.size() == 2 && path[1] == L':')
+        path += L'\\';
+    return path;
+}
+
+// 读取环境变量指向的目录，存在才采用
+static bool temp_dir_from_env(const wchar_t* name, std::wstring& out) {
+    DWORD need = GetEnvironmentVariableW(name, nullptr, 0);
+    if (need <= 1)
+        return false;
+    std::wstring value(need, L'\0');
+    DWORD written = GetEnvironmentVariableW(name, &value[0], need);
+    if (written == 0 || written >= need)
+        return false;
+    value.resize(written);
+
+    std::wstring expanded = trim_trailing_separators(expand_env_vars(value));
+    if (expanded.empty() || !directory_exists(expanded))
+        return false;
+    out = expanded;
+    return true;
+}
+
+// 动态获取临时目录：优先 %TEMP%，其次 %TMP%，都不行再交给系统 API
+std::wstring get_temp_dir() {
+    std::wstring dir;
+    if (temp_dir_from_env(L"TEMP", dir))
+        return dir;
+    if (temp_dir_from_env(L"TMP", dir))
+        return dir;
+
+    DWORD len = GetTempPathW(0, nullptr);
+    if (len == 0)
+        return L"";
+    std::wstring buf(len, L'\0');
+    DWORD written = GetTempPathW(len, &buf[0]);
+    if (written == 0 || written > len)
+        return L"";
+    buf.resize(written);
+    return trim_trailing_separators(buf);
+}
+
+std::wstring create_temp_dir(const std::wstring& prefix) {
+    std::wstring base = get_temp_dir();
+    if (base.empty())
+        return L"";
+
+    for (int i = 0; i < 32; ++i) {
+        wchar_t guid[64] = {0};
+        GUID id = {};
+        if (FAILED(CoCreateGuid(&id)))
+            return L"";
+        if (StringFromGUID2(id, guid, 64) == 0)
+            return L"";
+        std::wstring name = prefix + L"-" + guid;
+        for (wchar_t& c : name) {
+            if (c == L'{' || c == L'}' || c == L'-')
+                c = L'_';
+        }
+        std::wstring path = base + L"\\" + name;
+        if (CreateDirectoryW(path.c_str(), nullptr))
+            return path;
+        if (GetLastError() != ERROR_ALREADY_EXISTS)
+            return L"";
+    }
+    return L"";
 }
 
 // ============================================================
 //  路径
 // ============================================================
 
+bool is_absolute_path(const std::wstring& path) {
+    if (path.size() >= 2 && path[1] == L':')
+        return true;
+    if (path.size() >= 2 && (path[0] == L'\\' || path[0] == L'/'))
+        return true;
+    return false;
+}
+
 std::wstring get_python_path(const std::wstring& version) {
+    ConfigData cfg;
+    if (load_config(cfg)) {
+        for (const auto& kv : cfg.pythons) {
+            if (kv.first == version && !kv.second.empty())
+                return kv.second;
+        }
+    }
     return get_drive_letter() + L"/py" + version + L"/python.exe";
+}
+
+std::wstring get_python_scripts_dir(const std::wstring& version) {
+    std::wstring python = get_python_path(version);
+    size_t pos = python.find_last_of(L"/\\");
+    if (pos == std::wstring::npos)
+        return L"";
+    return python.substr(0, pos) + L"\\Scripts";
 }
 
 bool file_exists(const std::wstring& path) {
@@ -81,7 +473,8 @@ static std::wstring build_command_line(const std::wstring& app,
         cmd = app;
     for (const auto& arg : args) {
         cmd += L' ';
-        if (arg.find(L' ') != std::wstring::npos || arg.find(L'\t') != std::wstring::npos) {
+        if (!arg.empty() && (arg.find(L' ') != std::wstring::npos ||
+                             arg.find(L'\t') != std::wstring::npos)) {
             cmd += L'"' + arg + L'"';
         } else {
             cmd += arg;
@@ -99,13 +492,14 @@ int run_process_cmdline(const std::wstring& cmdline) {
     PROCESS_INFORMATION pi = {};
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
+    // 不设置 STARTF_USESTDHANDLES，子进程直接继承当前控制台，
+    // 交互式程序（REPL、pip 进度条）可以正常显示和接收输入。
+    si.dwFlags = 0;
 
     std::vector<wchar_t> buf(cmdline.begin(), cmdline.end());
     buf.push_back(0);
 
-    BOOL ok = CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
+    BOOL ok = CreateProcessW(nullptr, buf.data(), nullptr, nullptr, TRUE,
                               CREATE_UNICODE_ENVIRONMENT, nullptr, nullptr, &si, &pi);
     if (!ok) {
         DWORD err = GetLastError();
@@ -166,10 +560,10 @@ int run_process_with_output(
     PROCESS_INFORMATION pi = {};
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = hStdoutWr;
     si.hStdError  = hStderrWr;
-    si.wShowWindow = SW_HIDE;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
 
     std::vector<wchar_t> buf(cmdline.begin(), cmdline.end());
     buf.push_back(0);
@@ -302,9 +696,9 @@ bool extract_zip(const std::wstring& zip_path, const std::wstring& dest_dir) {
                         optVar.lVal = 0x14;
                         hr = pDestFolder->CopyHere(itemVar, optVar);
                         VariantClear(&itemVar);
-                        pItems->Release();
                         if (SUCCEEDED(hr)) {
                             bool ok = wait_for_extract(dest_dir);
+                            pItems->Release();
                             pDestFolder->Release();
                             pZipFolder->Release();
                             pShell->Release();
@@ -330,6 +724,7 @@ bool extract_zip(const std::wstring& zip_path, const std::wstring& dest_dir) {
 //  强制删除
 // ============================================================
 
+// 注意：全部使用 DeleteFileW / RemoveDirectoryW，文件不进入回收站
 bool force_delete_file(const std::wstring& path) {
     SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_NORMAL);
     for (int i = 0; i < 3; ++i) {
@@ -413,7 +808,23 @@ void print(const std::string& msg) { write_console(msg); }
 void println(const std::string& msg) { write_console(msg + "\n"); }
 void print_error(const std::string& msg) { write_console("[错误] " + msg + "\n", 12); }
 
+static std::function<void()>& exit_cleanup_slot() {
+    static std::function<void()> fn;
+    return fn;
+}
+
+void set_exit_cleanup(std::function<void()> cleanup) {
+    exit_cleanup_slot() = std::move(cleanup);
+}
+
 void die(const std::string& msg) {
     print_error(msg);
+    // exit() 不会调用栈上对象的析构函数，这里先执行注册的清理回调
+    auto& slot = exit_cleanup_slot();
+    if (slot) {
+        auto fn = slot;
+        slot = nullptr;
+        fn();
+    }
     exit(1);
 }
